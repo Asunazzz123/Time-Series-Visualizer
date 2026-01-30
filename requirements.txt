@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+# Optional: add numpy,pandas if you need them for data processing
+# numpy
+# pandas
