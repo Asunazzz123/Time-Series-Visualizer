@@ -2,3 +2,4 @@ __pycache__/
 data/
 node_modules/
 uploaded_files/
+.cache/

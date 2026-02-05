@@ -1,6 +1,5 @@
 fastapi
 uvicorn
 scipy
-# Optional: add numpy,pandas if you need them for data processing
-# numpy
-# pandas
+numpy
+pandas
