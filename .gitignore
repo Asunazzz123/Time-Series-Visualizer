@@ -1,4 +1,4 @@
 __pycache__/
-data/*.csv
+data/
 node_modules/
 uploaded_files/
