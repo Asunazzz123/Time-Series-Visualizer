@@ -144,6 +144,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
   const [isDatasetAlignEnabled, setIsDatasetAlignEnabled] = useState<boolean>(true);
   const [channelVisibleRanges, setChannelVisibleRanges] = useState<Record<string, [number, number] | null>>({});
   const [channelCutInputs, setChannelCutInputs] = useState<Record<string, { start: string; end: string }>>({});
+  const [referenceLines, setReferenceLines] = useState<Array<{ id: string; x: number; color: string }>>([]);
   const TARGET_DISPLAY_POINTS = 10000;  // 每个通道显示的目标点数 (SVG模式下建议降低点数以提升性能)
 
   const datasetMap = useMemo(() => {
@@ -158,6 +159,19 @@ const TimeSeriesAnalyzer: React.FC = () => {
     if (selectedDatasetIds.length > 0) return selectedDatasetIds;
     return multiChannelDatasets.map(ds => ds.id);
   }, [selectedDatasetIds, multiChannelDatasets]);
+
+  const referenceLineShapes = useMemo(() => {
+    return referenceLines.map(line => ({
+      type: 'line',
+      xref: 'x',
+      yref: 'paper',
+      x0: line.x,
+      x1: line.x,
+      y0: 0,
+      y1: 1,
+      line: { color: '#000000', width: 1, dash: 'solid' }
+    }));
+  }, [referenceLines]);
 
   const getDatasetColor = (datasetId: string): string => {
     const index = multiChannelDatasets.findIndex(ds => ds.id === datasetId);
@@ -231,6 +245,38 @@ const TimeSeriesAnalyzer: React.FC = () => {
       }
     }
     return lo;
+  };
+
+  const updateReferenceLinesFromRelayout = (event: Record<string, any>) => {
+    const updates: Record<number, number> = {};
+    Object.keys(event).forEach(key => {
+      const match = key.match(/^shapes\[(\d+)\]\.x0$/);
+      if (match) {
+        const idx = parseInt(match[1], 10);
+        const val = Number(event[key]);
+        if (Number.isFinite(val)) {
+          updates[idx] = val;
+        }
+      }
+    });
+    if (Object.keys(updates).length === 0) {
+      Object.keys(event).forEach(key => {
+        const match = key.match(/^shapes\[(\d+)\]\.x1$/);
+        if (match) {
+          const idx = parseInt(match[1], 10);
+          const val = Number(event[key]);
+          if (Number.isFinite(val)) {
+            updates[idx] = val;
+          }
+        }
+      });
+    }
+    if (Object.keys(updates).length === 0) return;
+    setReferenceLines(prev =>
+      prev.map((line, idx) =>
+        updates[idx] !== undefined ? { ...line, x: updates[idx] } : line
+      )
+    );
   };
 
   const ensureReferenceDataset = (datasets: MultiChannelDataset[], selectedIds: string[]) => {
@@ -688,6 +734,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
       setIsDatasetAlignEnabled(true);
       setChannelVisibleRanges({});
       setChannelCutInputs({});
+      setReferenceLines([]);
       
       // 显示删除信息
       const deletedCount = response.data.files_deleted_count || 0;
@@ -838,6 +885,17 @@ const TimeSeriesAnalyzer: React.FC = () => {
 
   const clearDatasetAutoOffsets = () => {
     setDatasetAutoOffsets({});
+  };
+
+  const addReferenceLine = () => {
+    const range = isMultiChannelMode
+      ? (selectedSeries ? (channelVisibleRanges[selectedSeries] ?? dataRange) : dataRange)
+      : (visibleRange ?? dataRange);
+    const defaultX = range ? (range[0] + range[1]) / 2 : 0;
+    setReferenceLines(prev => [
+      ...prev,
+      { id: `${Date.now()}-${prev.length}`, x: defaultX, color: '#000000' }
+    ]);
   };
 
   // 【Feature 1】移动序列到指定分组
@@ -1092,6 +1150,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
 
   const handleRelayout = (event: PlotRelayoutEvent) => {
     const e = event as Record<string, any>;
+    updateReferenceLinesFromRelayout(e);
     const x0 = e['xaxis.range[0]'];
     const x1 = e['xaxis.range[1]'];
     const autorange = e['xaxis.autorange'];
@@ -1105,6 +1164,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
 
   const handleChannelRelayout = (channelId: string, event: PlotRelayoutEvent) => {
     const e = event as Record<string, any>;
+    updateReferenceLinesFromRelayout(e);
     const x0 = e['xaxis.range[0]'];
     const x1 = e['xaxis.range[1]'];
     const autorange = e['xaxis.autorange'];
@@ -1124,7 +1184,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
 
   const chartLayout = useMemo<Partial<Layout>>(() => {
     return {
-      width: 800,
+      autosize: true,
       height: 500,
       title: { text: '多序列时序对比工具' },
       xaxis: { 
@@ -1134,8 +1194,9 @@ const TimeSeriesAnalyzer: React.FC = () => {
       yaxis: { title: { text: 'Value' } },
       hovermode: 'closest',
       uirevision: 'true', 
+      shapes: referenceLineShapes,
     };
-  }, [visibleRange]);
+  }, [visibleRange, referenceLineShapes]);
 
   // 判断是否有数据（支持大文件模式和多通道模式）
   const hasData = (!isMultiChannelMode && rawData && Object.keys(rawData).length > 0) ||
@@ -1159,7 +1220,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
   }
 
   return (
-    <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>
+    <div style={{ padding: '20px', fontFamily: 'sans-serif', width: '100%', boxSizing: 'border-box' }}>
       
       {/* 顶部工具栏：标题与操作按钮 */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
@@ -2191,7 +2252,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
         // 【多通道模式】显示多个独立的图表
         <div style={{ 
           display: 'grid', 
-          gridTemplateColumns: selectedChannels.length <= 2 ? 'repeat(1, 1fr)' : 'repeat(2, 1fr)', 
+          gridTemplateColumns: 'repeat(1, 1fr)', 
           gap: '15px',
           maxHeight: selectedChannels.length > 4 ? '800px' : 'auto',
           overflowY: selectedChannels.length > 4 ? 'auto' : 'visible'
@@ -2300,8 +2361,8 @@ const TimeSeriesAnalyzer: React.FC = () => {
             }
 
             const channelLayout: Partial<Layout> = {
-              width: selectedChannels.length <= 2 ? 800 : 400,
-              height: selectedChannels.length <= 2 ? 300 : 200,
+              autosize: true,
+              height: selectedChannels.length <= 2 ? 300 : 220,
               title: { 
                 text: `${displayName}${isLoading ? ' ⏳' : ''}`, 
                 font: { size: 12 } 
@@ -2319,7 +2380,8 @@ const TimeSeriesAnalyzer: React.FC = () => {
               hovermode: 'closest',
               showlegend: datasetIdsToShow.length > 1,
               legend: { font: { size: 9 } },
-              uirevision: `multi-channel-${channelId}`
+              uirevision: `multi-channel-${channelId}`,
+              shapes: referenceLineShapes
             };
             
             return (
@@ -2331,7 +2393,9 @@ const TimeSeriesAnalyzer: React.FC = () => {
                   padding: '10px',
                   backgroundColor: selectedSeries === channelId ? '#e6f7ff' : 'white',
                   cursor: 'pointer',
-                  position: 'relative'
+                  position: 'relative',
+                  width: '100%',
+                  boxSizing: 'border-box'
                 }}
                 onClick={() => setSelectedSeries(channelId)}
               >
@@ -2349,8 +2413,10 @@ const TimeSeriesAnalyzer: React.FC = () => {
                 <Plot
                   data={channelPlotData}
                   layout={channelLayout}
+                  useResizeHandler={true}
+                  style={{ width: '100%', height: '100%' }}
                   onRelayout={(e) => handleChannelRelayout(channelId, e)}
-                  config={{ responsive: true, displayModeBar: false }}
+                  config={{ responsive: true, displayModeBar: false, editable: true, edits: { shapePosition: true } }}
                 />
               </div>
             );
@@ -2361,9 +2427,38 @@ const TimeSeriesAnalyzer: React.FC = () => {
         <Plot
           data={plotData}
           layout={chartLayout}
+          useResizeHandler={true}
+          style={{ width: '100%', height: '100%' }}
           onRelayout={handleRelayout}
-          config={{ responsive: true, displayModeBar: true }}
+          config={{ responsive: true, displayModeBar: true, editable: true, edits: { shapePosition: true } }}
         />
+      )}
+
+      {/* 【多通道模式】参考线添加按钮 */}
+      {isMultiChannelMode && hasData && (
+        <button
+          onClick={addReferenceLine}
+          title="添加参考线"
+          style={{
+            position: 'fixed',
+            right: '24px',
+            bottom: '24px',
+            width: '52px',
+            height: '52px',
+            borderRadius: '50%',
+            backgroundColor: '#13c2c2',
+            color: 'white',
+            border: 'none',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+            cursor: 'pointer',
+            fontSize: '28px',
+            lineHeight: '52px',
+            textAlign: 'center',
+            zIndex: 1000
+          }}
+        >
+          +
+        </button>
       )}
     </div>
   );
