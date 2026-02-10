@@ -211,7 +211,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 # 【大文件配置】
 MAX_UPLOAD_SIZE = 1024 * 1024 * 1024  # 1GB 最大上传限制
-DEFAULT_DOWNSAMPLE_POINTS = 5000  # 默认降采样点数
+DEFAULT_DOWNSAMPLE_POINTS = 50000  # 默认降采样点数
 
 
 def _collect_csv_files() -> List[str]:

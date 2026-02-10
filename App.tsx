@@ -141,7 +141,10 @@ const TimeSeriesAnalyzer: React.FC = () => {
   const [isDatasetAligning, setIsDatasetAligning] = useState(false);
   const [referenceDatasetId, setReferenceDatasetId] = useState<string>('');
   const [selectedShiftDatasetId, setSelectedShiftDatasetId] = useState<string>('');
-  const TARGET_DISPLAY_POINTS = 5000;  // 每个通道显示的目标点数
+  const [isDatasetAlignEnabled, setIsDatasetAlignEnabled] = useState<boolean>(true);
+  const [channelVisibleRanges, setChannelVisibleRanges] = useState<Record<string, [number, number] | null>>({});
+  const [channelCutInputs, setChannelCutInputs] = useState<Record<string, { start: string; end: string }>>({});
+  const TARGET_DISPLAY_POINTS = 10000;  // 每个通道显示的目标点数 (SVG模式下建议降低点数以提升性能)
 
   const datasetMap = useMemo(() => {
     const map: Record<string, MultiChannelDataset> = {};
@@ -409,7 +412,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
   useEffect(() => {
     if (!isMultiChannelMode || !selectedSeries) return;
     const cut = channelCutRanges[selectedSeries];
-    const hasCut = !!cut?.enabled;
+    const hasCut = !!cut?.enabled && Number.isFinite(cut.start) && Number.isFinite(cut.end);
     datasetIdsToShow.forEach(datasetId => {
       const ds = datasetMap[datasetId];
       if (!ds?.is_large_file) return;
@@ -444,7 +447,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
       // 检查是否有格式错误
       if (response.data.error) {
         if (response.data.format_error) {
-          alert(`文件格式错误: ${response.data.message}\n\n多通道模式要求CSV文件格式为: time[s], AI2-01, AI2-02, ..., AI2-16`);
+          alert(`文件格式错误: ${response.data.message}\n\n多通道模式要求CSV文件格式为: time[s], AI2-xx, AI2-yy, ... (通道数量可变，允许缺失)`);
         } else {
           alert(`上传失败: ${response.data.message}`);
         }
@@ -682,6 +685,9 @@ const TimeSeriesAnalyzer: React.FC = () => {
       setDatasetManualOffsets({});
       setReferenceDatasetId('');
       setSelectedShiftDatasetId('');
+      setIsDatasetAlignEnabled(true);
+      setChannelVisibleRanges({});
+      setChannelCutInputs({});
       
       // 显示删除信息
       const deletedCount = response.data.files_deleted_count || 0;
@@ -805,7 +811,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
       : datasetIds[0];
 
     const cut = channelCutRanges[selectedSeries];
-    const cutRange = cut?.enabled ? [cut.start, cut.end] : null;
+    const cutRange = (cut?.enabled && Number.isFinite(cut.start) && Number.isFinite(cut.end)) ? [cut.start, cut.end] : null;
 
     setIsDatasetAligning(true);
     try {
@@ -1003,7 +1009,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
         name: `${seriesName} [${group}]`,
         x: currentX, 
         y: effectiveY,
-        type: 'scattergl', 
+        type: 'scatter', 
         mode: 'lines',
         line: { width: 1.5, color } 
       } as Data;
@@ -1063,8 +1069,8 @@ const TimeSeriesAnalyzer: React.FC = () => {
     if (!effectiveRange) return isMultiChannelMode ? 0.01 : 1;
     const length = Math.abs(effectiveRange[1] - effectiveRange[0]);
     if (isMultiChannelMode) {
-      const rawStep = length === 0 ? 0.01 : length * 0.01;
-      return Math.max(0.0001, rawStep);
+      const rawStep = length === 0 ? 0.01 : length * 0.001;
+      return Math.max(0.001, rawStep);
     }
     const rawStep = length === 0 ? 1 : length * 0.01;
     return Math.max(1, Math.ceil(rawStep));
@@ -1094,6 +1100,25 @@ const TimeSeriesAnalyzer: React.FC = () => {
       setVisibleRange([Number(x0), Number(x1)]);
     } else if (autorange === true || e['xaxis.autorange'] === true) {
       setVisibleRange(null);
+    }
+  };
+
+  const handleChannelRelayout = (channelId: string, event: PlotRelayoutEvent) => {
+    const e = event as Record<string, any>;
+    const x0 = e['xaxis.range[0]'];
+    const x1 = e['xaxis.range[1]'];
+    const autorange = e['xaxis.autorange'];
+
+    if (x0 !== undefined && x1 !== undefined) {
+      setChannelVisibleRanges(prev => ({
+        ...prev,
+        [channelId]: [Number(x0), Number(x1)]
+      }));
+    } else if (autorange === true || e['xaxis.autorange'] === true) {
+      setChannelVisibleRanges(prev => ({
+        ...prev,
+        [channelId]: null
+      }));
     }
   };
 
@@ -1168,7 +1193,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
               style={{ padding: '4px 8px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '12px' }}
             >
               <option value="single">单通道模式</option>
-              <option value="multi">多通道模式 (16通道)</option>
+              <option value="multi">多通道模式</option>
             </select>
           </div>
 
@@ -1413,7 +1438,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
           border: '1px solid #87e8de'
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-            <h4 style={{ margin: 0 }}>📡 通道管理 (16通道)</h4>
+            <h4 style={{ margin: 0 }}>📡 通道管理</h4>
             
             {/* 全选/取消全选 */}
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
@@ -1702,61 +1727,6 @@ const TimeSeriesAnalyzer: React.FC = () => {
                 </span>
               </div>
 
-              {/* 数据集自动对齐 */}
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-                <label style={{ fontWeight: 'bold' }}>数据集对齐:</label>
-                <select
-                  value={referenceDatasetId || ''}
-                  onChange={(e) => setReferenceDatasetId(e.target.value)}
-                  style={{ padding: '4px 8px', borderRadius: '4px', border: '1px solid #87e8de', minWidth: '160px' }}
-                  title="选择参考数据集（其他数据集将对齐到它）"
-                >
-                  {datasetIdsToShow.map(datasetId => {
-                    const ds = datasetMap[datasetId];
-                    if (!ds) return null;
-                    return (
-                      <option key={datasetId} value={datasetId}>
-                        参考: {ds.name || ds.filename || datasetId}
-                      </option>
-                    );
-                  })}
-                </select>
-                <button
-                  onClick={handleAutoAlignDatasets}
-                  disabled={isDatasetAligning || datasetIdsToShow.length < 2}
-                  style={{
-                    padding: '6px 16px',
-                    backgroundColor: isDatasetAligning ? '#ccc' : '#13c2c2',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: isDatasetAligning || datasetIdsToShow.length < 2 ? 'not-allowed' : 'pointer',
-                    fontWeight: 'bold'
-                  }}
-                >
-                  {isDatasetAligning ? '对齐中...' : '执行对齐'}
-                </button>
-                <button
-                  onClick={clearDatasetAutoOffsets}
-                  disabled={Object.keys(datasetAutoOffsets).length === 0}
-                  style={{
-                    padding: '6px 12px',
-                    backgroundColor: Object.keys(datasetAutoOffsets).length === 0 ? '#ccc' : '#faad14',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: Object.keys(datasetAutoOffsets).length === 0 ? 'not-allowed' : 'pointer'
-                  }}
-                >
-                  清除对齐
-                </button>
-                {Object.keys(datasetAutoOffsets).length > 0 && (
-                  <span style={{ fontSize: '12px', color: '#52c41a' }}>
-                    ✓ 已对齐 {Object.keys(datasetAutoOffsets).length} 个数据集
-                  </span>
-                )}
-              </div>
-
               <button 
                 onClick={() => {
                   setDatasetManualOffsets({});
@@ -1986,25 +1956,44 @@ const TimeSeriesAnalyzer: React.FC = () => {
               border: '1px solid #87e8de' 
             }}>
               {/* 通道切割控制 */}
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
                 <label style={{ fontWeight: 'bold' }}>✂️ 通道切割 (时间) ({channelNames[selectedSeries] || selectedSeries}):</label>
                 <label>
                   <input
                     type="checkbox"
                     checked={channelCutRanges[selectedSeries]?.enabled || false}
                     onChange={(e) => {
-                      const current = channelCutRanges[selectedSeries] || { start: 0, end: 1, enabled: false };
-                      updateChannelCutRange(selectedSeries, current.start, current.end, e.target.checked);
+                      const current = channelCutRanges[selectedSeries];
+                      if (current) {
+                        updateChannelCutRange(selectedSeries, current.start, current.end, e.target.checked);
+                      } else if (!e.target.checked) {
+                        updateChannelCutRange(selectedSeries, 0, 0, false);
+                      } else {
+                        setChannelCutRanges(prev => ({
+                          ...prev,
+                          [selectedSeries]: { start: 0, end: 0, enabled: true }
+                        }));
+                      }
                     }}
                   />
                   启用
                 </label>
                 <input
                   type="number"
-                  value={channelCutRanges[selectedSeries]?.start ?? 0}
+                  value={channelCutInputs[selectedSeries]?.start ?? ''}
                   onChange={(e) => {
-                    const current = channelCutRanges[selectedSeries] || { start: 0, end: 1, enabled: false };
-                    updateChannelCutRange(selectedSeries, Math.max(0, parseFloat(e.target.value) || 0), current.end, current.enabled);
+                    const val = e.target.value;
+                    setChannelCutInputs(prev => ({
+                      ...prev,
+                      [selectedSeries]: { start: val, end: prev[selectedSeries]?.end ?? '' }
+                    }));
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return;
+                    const current = channelCutRanges[selectedSeries] || { start: 0, end: 0, enabled: false };
+                    const startVal = parseFloat(channelCutInputs[selectedSeries]?.start ?? '');
+                    if (!Number.isFinite(startVal)) return;
+                    updateChannelCutRange(selectedSeries, Math.max(0, startVal), current.end, current.enabled);
                   }}
                   disabled={!channelCutRanges[selectedSeries]?.enabled}
                   style={{ width: '100px', padding: '4px' }}
@@ -2014,16 +2003,90 @@ const TimeSeriesAnalyzer: React.FC = () => {
                 <span>-</span>
                 <input
                   type="number"
-                  value={channelCutRanges[selectedSeries]?.end ?? 1}
+                  value={channelCutInputs[selectedSeries]?.end ?? ''}
                   onChange={(e) => {
-                    const current = channelCutRanges[selectedSeries] || { start: 0, end: 1, enabled: false };
-                    updateChannelCutRange(selectedSeries, current.start, parseFloat(e.target.value) || 1, current.enabled);
+                    const val = e.target.value;
+                    setChannelCutInputs(prev => ({
+                      ...prev,
+                      [selectedSeries]: { start: prev[selectedSeries]?.start ?? '', end: val }
+                    }));
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return;
+                    const current = channelCutRanges[selectedSeries] || { start: 0, end: 0, enabled: false };
+                    const endVal = parseFloat(channelCutInputs[selectedSeries]?.end ?? '');
+                    if (!Number.isFinite(endVal)) return;
+                    updateChannelCutRange(selectedSeries, current.start, endVal, current.enabled);
                   }}
                   disabled={!channelCutRanges[selectedSeries]?.enabled}
                   style={{ width: '100px', padding: '4px' }}
                   placeholder="结束(s)"
                   step="0.001"
                 />
+              </div>
+
+              {/* 数据集自动对齐（放在切割面板中） */}
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <label style={{ fontWeight: 'bold' }}>数据集对齐:</label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={isDatasetAlignEnabled}
+                    onChange={(e) => setIsDatasetAlignEnabled(e.target.checked)}
+                  />
+                  启用
+                </label>
+                <select
+                  value={referenceDatasetId || ''}
+                  onChange={(e) => setReferenceDatasetId(e.target.value)}
+                  style={{ padding: '4px 8px', borderRadius: '4px', border: '1px solid #87e8de', minWidth: '160px' }}
+                  title="选择参考数据集（其他数据集将对齐到它）"
+                  disabled={!isDatasetAlignEnabled}
+                >
+                  {datasetIdsToShow.map(datasetId => {
+                    const ds = datasetMap[datasetId];
+                    if (!ds) return null;
+                    return (
+                      <option key={datasetId} value={datasetId}>
+                        参考: {ds.name || ds.filename || datasetId}
+                      </option>
+                    );
+                  })}
+                </select>
+                <button
+                  onClick={handleAutoAlignDatasets}
+                  disabled={!isDatasetAlignEnabled || isDatasetAligning || datasetIdsToShow.length < 2}
+                  style={{
+                    padding: '6px 16px',
+                    backgroundColor: (!isDatasetAlignEnabled || isDatasetAligning) ? '#ccc' : '#13c2c2',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: (!isDatasetAlignEnabled || isDatasetAligning || datasetIdsToShow.length < 2) ? 'not-allowed' : 'pointer',
+                    fontWeight: 'bold'
+                  }}
+                >
+                  {isDatasetAligning ? '对齐中...' : '执行对齐'}
+                </button>
+                <button
+                  onClick={clearDatasetAutoOffsets}
+                  disabled={Object.keys(datasetAutoOffsets).length === 0}
+                  style={{
+                    padding: '6px 12px',
+                    backgroundColor: Object.keys(datasetAutoOffsets).length === 0 ? '#ccc' : '#faad14',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: Object.keys(datasetAutoOffsets).length === 0 ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  清除对齐
+                </button>
+                {Object.keys(datasetAutoOffsets).length > 0 && (
+                  <span style={{ fontSize: '12px', color: '#52c41a' }}>
+                    ✓ 已对齐 {Object.keys(datasetAutoOffsets).length} 个数据集
+                  </span>
+                )}
               </div>
             </div>
           )}
@@ -2096,7 +2159,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
           暂无数据，请点击右上角上传 CSV 文件
           {isMultiChannelMode && (
             <div style={{ marginTop: '10px', fontSize: '12px' }}>
-              多通道模式要求CSV格式: time[s], AI2-01, AI2-02, ..., AI2-16
+              多通道模式要求CSV格式: time[s], AI2-xx, AI2-yy, ... (通道数量可变，允许缺失)
             </div>
           )}
         </div>
@@ -2146,7 +2209,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
                 if (!displayData || displayData.x.length === 0) {
                   return null;
                 }
-                if (channelCutRanges[channelId]?.enabled) {
+                if (channelCutRanges[channelId]?.enabled && Number.isFinite(channelCutRanges[channelId].start) && Number.isFinite(channelCutRanges[channelId].end)) {
                   const startTime = channelCutRanges[channelId].start;
                   const endTime = channelCutRanges[channelId].end;
                   const startIdx = findStartIndexArray(displayData.x, startTime);
@@ -2163,8 +2226,8 @@ const TimeSeriesAnalyzer: React.FC = () => {
 
                 // 获取通道独立的切割范围（仅小文件）
                 const channelCut = channelCutRanges[channelId];
-                const start = channelCut?.enabled ? channelCut.start : undefined;
-                const end = channelCut?.enabled ? channelCut.end : undefined;
+                const start = (channelCut?.enabled && Number.isFinite(channelCut.start)) ? channelCut.start : undefined;
+                const end = (channelCut?.enabled && Number.isFinite(channelCut.end)) ? channelCut.end : undefined;
 
                 if (start !== undefined && end !== undefined) {
                   const startIdx = findStartIndex(series.x, start);
@@ -2179,7 +2242,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
 
               // 获取数据集偏移量（手动 + 自动对齐）
               const datasetManualOffset = datasetManualOffsets[datasetId] || 0;
-              const datasetAutoOffset = datasetAutoOffsets[datasetId] || 0;
+              const datasetAutoOffset = isDatasetAlignEnabled ? (datasetAutoOffsets[datasetId] || 0) : 0;
               const totalOffset = datasetManualOffset + datasetAutoOffset;
 
               let currentX: number[] | Float32Array;
@@ -2205,7 +2268,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
                 name: displayName,
                 x: currentX,
                 y: yData,
-                type: 'scattergl',
+                type: 'scatter',  // 避免 WebGL 上下文限制
                 mode: 'lines',
                 line: { width: 1.5, color }
               } as Data;
@@ -2245,7 +2308,8 @@ const TimeSeriesAnalyzer: React.FC = () => {
               },
               xaxis: { 
                 title: { text: 'Time [s]', font: { size: 10 } },
-                tickfont: { size: 9 }
+                tickfont: { size: 9 },
+                range: channelVisibleRanges[channelId] || undefined
               },
               yaxis: { 
                 title: { text: 'Value', font: { size: 10 } },
@@ -2254,7 +2318,8 @@ const TimeSeriesAnalyzer: React.FC = () => {
               margin: { l: 50, r: 20, t: 40, b: 40 },
               hovermode: 'closest',
               showlegend: datasetIdsToShow.length > 1,
-              legend: { font: { size: 9 } }
+              legend: { font: { size: 9 } },
+              uirevision: `multi-channel-${channelId}`
             };
             
             return (
@@ -2284,6 +2349,7 @@ const TimeSeriesAnalyzer: React.FC = () => {
                 <Plot
                   data={channelPlotData}
                   layout={channelLayout}
+                  onRelayout={(e) => handleChannelRelayout(channelId, e)}
                   config={{ responsive: true, displayModeBar: false }}
                 />
               </div>

@@ -1,17 +1,17 @@
 import csv
 import os
 import uuid
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
-# 多通道数据格式定义（16通道）
-MULTI_CHANNEL_HEADERS = ["time[s]"] + [f"AI2-{str(i).zfill(2)}" for i in range(1, 17)]
-EXPECTED_CHANNEL_COUNT = 16
+# 多通道数据格式定义（可变通道）
+CHANNEL_PREFIX = "AI2-"
 
 # 大文件处理配置
 LARGE_FILE_THRESHOLD = 50 * 1024 * 1024  # 50MB以上视为大文件
-DEFAULT_DOWNSAMPLE_POINTS = 5000  # 默认降采样到5000个点
+DEFAULT_DOWNSAMPLE_POINTS = 50000  # 默认降采样到50000个点
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
 
 
@@ -23,23 +23,26 @@ class MultiChannelFormatError(Exception):
 def validate_multi_channel_format(headers: List[str]) -> Tuple[bool, str]:
     """
     验证多通道数据格式是否正确
-    期望格式: time[s], AI2-01, AI2-02, ..., AI2-16
+    期望格式: time[s], AI2-xx, AI2-yy, ... (通道数量可变，允许缺失)
     返回: (是否有效, 错误消息)
     """
-    if len(headers) != len(MULTI_CHANNEL_HEADERS):
-        return False, f"列数不正确，期望 {len(MULTI_CHANNEL_HEADERS)} 列，实际 {len(headers)} 列"
-    
     # 检查 time 列（移除可能的BOM字符和空白）
     first_col = headers[0].strip().lstrip('\ufeff').lower()
     if first_col != "time[s]":
         return False, f"第一列应为 'time[s]'，实际为 '{headers[0]}'"
     
+    if len(headers) <= 1:
+        return False, "至少需要一个 AI2-xx 通道列"
+
     # 检查每个 AI2-xx 列
-    for i in range(1, 17):
-        expected = f"AI2-{str(i).zfill(2)}"
-        actual = headers[i].strip() if i < len(headers) else "缺失"
-        if actual != expected:
-            return False, f"第 {i+1} 列应为 '{expected}'，实际为 '{actual}'"
+    for idx, header in enumerate(headers[1:], start=2):
+        actual = header.strip()
+        if not actual.startswith(CHANNEL_PREFIX):
+            return False, f"第 {idx} 列应为 'AI2-xx' 格式，实际为 '{header}'"
+        # 必须是 AI2- 后跟数字（允许两位或更多）
+        suffix = actual[len(CHANNEL_PREFIX):]
+        if not suffix.isdigit():
+            return False, f"第 {idx} 列应为 'AI2-xx' 格式，实际为 '{header}'"
     
     return True, ""
 
@@ -252,18 +255,40 @@ class MultiChannelLargeFileHandler:
         """获取时间列的缓存文件路径"""
         file_hash = str(hash(str(self.filepath) + str(os.path.getmtime(self.filepath))))[-8:]
         return self.cache_dir / f"{self.filepath.stem}_time_{file_hash}.npy"
+
+    def get_meta_cache_path(self) -> Path:
+        """获取元信息缓存文件路径"""
+        file_hash = str(hash(str(self.filepath) + str(os.path.getmtime(self.filepath))))[-8:]
+        return self.cache_dir / f"{self.filepath.stem}_meta_{file_hash}.json"
+
+    def _load_channels_from_header(self) -> List[str]:
+        with open(self.filepath, 'r', encoding='utf-8') as f:
+            header_line = f.readline().strip()
+            headers = [h.strip() for h in header_line.split(',')]
+        is_valid, error_msg = validate_multi_channel_format(headers)
+        if not is_valid:
+            raise MultiChannelFormatError(f"文件格式不正确: {error_msg}")
+        return headers[1:]
     
     def is_cached(self) -> bool:
         """检查是否已有缓存"""
         time_cache = self.get_time_cache_path()
-        if not time_cache.exists():
+        meta_cache = self.get_meta_cache_path()
+        if not time_cache.exists() or not meta_cache.exists():
             return False
-        # 检查至少一个通道的缓存
-        for i in range(1, 17):
-            channel_id = f"AI2-{str(i).zfill(2)}"
-            if self.get_cache_path(channel_id).exists():
-                return True
-        return False
+        try:
+            with open(meta_cache, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            channels = meta.get("channels", [])
+        except Exception:
+            return False
+        if not channels:
+            return False
+        # 确保所有通道缓存都存在
+        for channel_id in channels:
+            if not self.get_cache_path(channel_id).exists():
+                return False
+        return True
     
     def parse_and_cache(self, progress_callback=None) -> Dict[str, any]:
         """
@@ -273,15 +298,7 @@ class MultiChannelLargeFileHandler:
         import pandas as pd
         
         # 首先读取表头验证格式
-        with open(self.filepath, 'r', encoding='utf-8') as f:
-            header_line = f.readline().strip()
-            headers = [h.strip() for h in header_line.split(',')]
-        
-        is_valid, error_msg = validate_multi_channel_format(headers)
-        if not is_valid:
-            raise MultiChannelFormatError(f"文件格式不正确: {error_msg}")
-        
-        self.channels = headers[1:]  # AI2-01 到 AI2-16
+        self.channels = self._load_channels_from_header()
         
         # 使用 pandas 分块读取
         chunk_size = 100000  # 每次读取10万行
@@ -314,19 +331,43 @@ class MultiChannelLargeFileHandler:
             channel_array = np.concatenate(channel_data[channel_id]).astype(np.float32)
             np.save(self.get_cache_path(channel_id), channel_array)
             self._cache_paths[channel_id] = self.get_cache_path(channel_id)
-        
-        return {
+
+        meta = {
             "total_rows": self.total_rows,
             "channels": self.channels,
             "time_range": self.time_range
         }
+        # 写入元信息缓存
+        try:
+            with open(self.get_meta_cache_path(), 'w', encoding='utf-8') as f:
+                json.dump(meta, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+        return meta
     
     def load_metadata(self) -> Dict[str, any]:
         """从缓存加载元信息"""
+        meta_cache = self.get_meta_cache_path()
+        if meta_cache.exists():
+            try:
+                with open(meta_cache, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+                self.channels = meta.get("channels", [])
+                self.total_rows = meta.get("total_rows", 0)
+                self.time_range = tuple(meta.get("time_range", (0.0, 0.0)))
+                return {
+                    "total_rows": self.total_rows,
+                    "channels": self.channels,
+                    "time_range": self.time_range
+                }
+            except Exception:
+                pass
+
         time_array = np.load(self.get_time_cache_path())
         self.total_rows = len(time_array)
         self.time_range = (float(time_array[0]), float(time_array[-1]))
-        self.channels = [f"AI2-{str(i).zfill(2)}" for i in range(1, 17)]
+        self.channels = self._load_channels_from_header()
         return {
             "total_rows": self.total_rows,
             "channels": self.channels,
